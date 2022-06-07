@@ -1,0 +1,1303 @@
+---
+title: "Natural Language Processing and Machine Learning Classification"
+author: "Hippolyte GISSEROT-BOUKHLEF"
+date: "November 8, 2021"
+output: html_document
+---
+
+<style>
+body {text-align: justify}
+</style>
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+working_directory <- ""
+knitr::opts_knit$set(root.dir = working_directory)
+```
+
+```{r}
+library(tm)
+library(RTextTools)
+library(tidytext)
+library(e1071)
+library (dplyr)
+library(tidyr)
+library(tidyverse)
+library(ggplot2)
+library(kableExtra)
+library(knitr)
+library(caret)
+```
+
+## Part I: Model Training
+
+First, we need to download the relevant data set, previously retrieved from SQL.
+
+```{r}
+
+# Download relevant dataset
+rcv.data <- read.csv("rcv1_db.csv", sep = ";")
+colnames(rcv.data)[1] <- "id"
+rcv.data[rcv.data == ""] <- NA
+view(rcv.data)
+
+```
+
+Before starting our analysis regarding top categories, we need to complete several data cleaning tasks on our dataset:  
+
+* First, we create a sub-data frame only comprising of the h1 categories (top categories: ECAT, MCAT, GCAT, CCAT) and their id.
+* Then, we remove all the NAs and the potential duplicates.  
+
+```{r}
+
+# Create the relevant data frame
+rcv.data.a <- rcv.data %>% select(id, article, h1, id_cat)
+rcv.data.a <- na.omit(rcv.data.a)
+rcv.data.a <- unique(rcv.data.a)
+row.names(rcv.data.a) <- NULL
+biew(rcv.data.a)
+
+```
+
+Now that the dataset is clean, we can create the relevant document-term matrix and container. Below are the parameters we chose to use in our analysis:  
+
+* Size of train/test sets: We decided to divide the whole dataset into two parts of equal sizes. The model was trained on 50% of the sample, which leaves a sufficient number of exploitable data and limits the processing time (which would have been significantly longer by choosing an 80/20 split instead). 
+* Sparse threshold: Removing sparse terms is critical since it allows to drastically shorten processing time by reducing the size of the document-term matrix. 1% appeared to be a good compromise between keeping enough terms to train the model while removing enough to significantly lighten the model.     
+* Weighting method: "weightTF" is the most intuitive method regarding term weighting. It simply accounts for the frequency of observation of each term in the sample.  
+* Virgin: The "virgin" parameter is set to FALSE because we are still in the evaluation stage and not yet ready to classify virgin documents. For instance, when the virgin flag is set to FALSE, indicating that all data in the training and testing sets have corresponding labels, create_analytics() will check the results of the learning algorithms against the true values to determine the accuracy of the  However, if the virgin flag is set to TRUE, indicating that the testing set is unclassified data with no known true values, create_analytics() will return as much information as possible without comparing each predicted value to its true label.
+
+```{r}
+
+N <- nrow(rcv.data.a)
+Ntrain <- 0.5*N
+Ntest <- N - Ntrain
+sparseThreshold <- 0.01
+
+# Create document-term matrix
+rcv.matrix.a <- create_matrix(rcv.data.a$article,
+                          language = "english",
+                          removeSparseTerms = (1-sparseThreshold),
+                          weighting = weightTf)
+
+# Create container
+rcv.container.a <- create_container(rcv.matrix.a, rcv.data.a$id_cat,
+                                 trainSize = 1:Ntrain,
+                                 testSize = (Ntrain+1):N,
+                                 virgin = FALSE)
+
+```
+
+Let's then train and test the different models.  
+
+#### Support Vector Machine:  
+
+A support-vector machine constructs a hyperplane or set of hyperplanes in a high-dimensional space, which is commonly used for classification purposes. Intuitively, a good separation is achieved by the hyperplane that has the largest distance to the nearest training-data point of any class (so-called functional margin), since in general the larger the margin, the lower the generalization error of the classifier. 
+
+The vectors defining the hyperplanes can be chosen to be linear combinations with parameters $\alpha _{i}$ of images of feature vectors $x_{i}$ that occur in the data base. With this choice of a hyperplane, the points x in the feature space that are mapped into the hyperplane are defined by the relation $\sum_{i} \alpha_{i}k(x_{i},x) = constant$. Note that if $k(x,y)$ becomes small as $y$ grows further away from $x$, each term in the sum measures the degree of closeness of the test point $x$ to the corresponding data base point $x_{i}$. In this way, the sum of kernels above can be used to measure the relative nearness of each test point to the data points originating in one or the other of the sets to be discriminated. 
+
+Note the fact that the set of points $x$ mapped into any hyperplane can be quite convoluted as a result, allowing much more complex discrimination between sets that are not convex at all in the original space.
+
+```{r}
+
+# Train
+rcv.svm.a <- train_model(rcv.container.a, "SVM")
+
+# Classify
+rcv.svm_classify.a <- classify_model(rcv.container.a, rcv.svm.a)
+
+# Evaluate
+rcv.svm_analytics.a <- create_analytics(rcv.container.a, rcv.svm_classify.a)
+
+# Show analytics
+rcv.svm_summary.a <- summary(rcv.svm_analytics.a)
+rcv.svm_ensemble.a <- rcv.svm_analytics.a@ensemble_summary
+rcv.svm_performance.a <- rcv.svm_analytics.a@algorithm_summary
+rcv.svm_confmat.a <- confusionMatrix(factor(rcv.svm_analytics.a@document_summary$SVM_LABEL),
+                                   factor(rcv.svm_analytics.a@document_summary$MANUAL_CODE))
+
+```
+
+#### Classification Trees:
+
+A decision tree is a simple representation for classifying examples. For this section, assume that all of the input features have finite discrete domains, and there is a single target feature called the "classification". Each element of the domain of the classification is called a class. A decision tree or a classification tree is a tree in which each internal (non-leaf) node is labeled with an input feature. The arcs coming from a node labeled with an input feature are labeled with each of the possible values of the target feature or the arc leads to a subordinate decision node on a different input feature. Each leaf of the tree is labeled with a class or a probability distribution over the classes, signifying that the data set has been classified by the tree into either a specific class, or into a particular probability distribution (which, if the decision tree is well-constructed, is skewed towards certain subsets of classes).
+
+A tree is built by splitting the source set, constituting the root node of the tree, into subsets—which constitute the successor children. The splitting is based on a set of splitting rules based on classification features. This process is repeated on each derived subset in a recursive manner called recursive partitioning. The recursion is completed when the subset at a node has all the same values of the target variable, or when splitting no longer adds value to the predictions.
+
+Data comes in records of the form:
+
+$$(x,Y)=(x_{1},x_{2},x_{3},...,x_{k},Y)$$ 
+The dependent variable, $Y$, is the target variable that we are trying to understand, classify or generalize. The vector $x$ is composed of the features, $x_{1},x_{2},x_{3}$ etc., that are used for that task.
+
+```{r}
+
+# Train
+rcv.tree.a <- train_model(rcv.container.a, "TREE")
+
+# Classify
+rcv.tree_classify.a <- classify_model(rcv.container.a, rcv.tree.a)
+
+# Evaluate
+rcv.tree_analytics.a <- create_analytics(rcv.container.a, rcv.tree_classify.a)
+
+# Show analytics
+rcv.tree_summary.a <- summary(rcv.tree_analytics.a)
+rcv.tree_ensemble.a <- rcv.tree_analytics.a@ensemble_summary
+rcv.tree_performance.a <- rcv.tree_analytics.a@algorithm_summary
+rcv.tree_confmat.a <- confusionMatrix(factor(rcv.tree_analytics.a@document_summary$TREE_LABEL),
+                                    factor(rcv.tree_analytics.a@document_summary$MANUAL_CODE))
+
+```
+
+### Random Forests: 
+
+Random forests are an ensemble learning method for classification, regression and other tasks that operates by constructing a multitude of decision trees at training time. For classification tasks, the output of the random forest is the class selected by most trees. 
+
+Decision trees that are grown very deep tend to learn highly irregular patterns: they overfit their training sets, i.e. have low bias, but very high variance. Random forests are a way of averaging multiple deep decision trees, trained on different parts of the same training set, with the goal of reducing the variance. This comes at the expense of a small increase in the bias and some loss of interpretability, but generally greatly boosts the performance in the final model.
+
+The training algorithm for random forests applies the general technique of bootstrap aggregating, or bagging, to tree learners. Given a training set $X = x_{1}, ..., x_{n}$ with responses $Y = y_{1}, ..., y_{n}$, bagging repeatedly ($B$ times) selects a random sample with replacement of the training set and fits trees to these samples. For $b = 1, ..., B$, sample, with replacement, $n$ training examples from $X, Y$; call these $X_{b}, Y_{b}$, and then train a classification tree $f_{b}$ on $X_{b}, Y_{b}$. After training, predictions for unseen samples $x'$ can be made by taking the majority vote in the case of classification trees.
+
+```{r}
+
+# Train
+rcv.rf.a <- train_model(rcv.container.a, "RF")
+
+# Classify
+rcv.rf_classify.a <- classify_model(rcv.container.a, rcv.rf.a)
+
+# Evaluate
+rcv.rf_analytics.a <- create_analytics(rcv.container.a, rcv.rf_classify.a)
+                                  
+# Show analytics
+rcv.rf_summary.a <- summary(rcv.rf_analytics.a)
+rcv.rf_ensemble.a <- rcv.rf_analytics.a@ensemble_summary
+rcv.rf_performance.a <- rcv.rf_analytics.a@algorithm_summary
+rcv.rf_confmat.a <- confusionMatrix(factor(rcv.rf_analytics.a@document_summary$FORESTS_LABEL),
+                                  factor(rcv.rf_analytics.a@document_summary$MANUAL_CODE))
+
+```
+
+#### Neural Networks:
+
+Artificial neural networks (ANNs) are comprised of a node layers, containing an input layer, one or more hidden layers, and an output layer. Each node, or artificial neuron, connects to another and has an associated weight and threshold. If the output of any individual node is above the specified threshold value, that node is activated, sending data to the next layer of the network. Otherwise, no data is passed along to the next layer of the network.
+
+Each individual node is composed of input data, weights, a bias (or threshold), and an output. The formula would be of the form: 
+$$\sum_{i} w_{i}x_{i} + bias$$
+
+$$
+output = f(x) = \left\{
+    \begin{array}{ll}
+        1 & \mbox{if } \sum_{i} w_{i}x_{i} + bias \geqslant 0 \\
+        0 & \mbox{if } \sum_{i} w_{i}x_{i} + bias < 0
+    \end{array}
+\right.
+$$
+
+Once an input layer is determined, weights are assigned. These weights help determine the importance of any given variable, with larger ones contributing more significantly to the output compared to other inputs. All inputs are then multiplied by their respective weights and then summed. Afterward, the output is passed through an activation function, which determines the output. If that output exceeds a given threshold, it “fires” (or activates) the node, passing data to the next layer in the network. This results in the output of one node becoming in the input of the next node. This process of passing data from one layer to the next layer defines this neural network as a feedforward network.
+
+```{r}
+
+# Train
+rcv.nnet.a <- train_model(rcv.container.a, "NNET")
+
+# Classify
+rcv.nnet_classify.a <- classify_model(rcv.container.a, rcv.nnet.a)
+
+# Evaluate
+rcv.nnet_analytics.a <- create_analytics(rcv.container.a, rcv.nnet_classify.a)
+                                  
+# Show analytics
+rcv.nnet_summary.a <- summary(rcv.nnet_analytics.a)
+rcv.nnet_ensemble.a <- rcv.nnet_analytics.a@ensemble_summary
+rcv.nnet_performance.a <- rcv.nnet_analytics.a@algorithm_summary
+rcv.nnet_confmat.a <- confusionMatrix(factor(rcv.nnet_analytics.a@document_summary$NNETWORK_LABEL), 
+                                    factor(rcv.nnet_analytics.a@document_summary$MANUAL_CODE))
+
+```
+
+Ultimately, let's export the analytics outputs to csv files.
+
+```{r}
+
+# Ensemble summaries
+accuracies.a <- c(as.data.frame(rcv.svm_ensemble.a)$`n-ENSEMBLE RECALL`, 
+                  as.data.frame(rcv.tree_ensemble.a)$`n-ENSEMBLE RECALL`,
+                  as.data.frame(rcv.rf_ensemble.a)$`n-ENSEMBLE RECALL`, 
+                  as.data.frame(rcv.nnet_ensemble.a)$`n-ENSEMBLE RECALL`)
+summaries.a <- rbind(accuracies.a, cbind(rcv.svm_summary.a, rcv.tree_summary.a, rcv.rf_summary.a, rcv.nnet_summary.a))
+row.names(summaries.a) <- c("ACCURACY", "PRECISION", "RECALL", "FSCORE")
+colnames(summaries.a) <- c("SVM", "TREE", "FORESTS", "NNETWORK")
+write.csv(summaries.a, "a_summaries.csv")
+
+# Algorithm performances
+performances.a <- cbind(rcv.svm_performance.a, rcv.tree_performance.a, rcv.rf_performance.a, rcv.nnet_performance.a)
+write.csv(performances.a, "a_performances.csv")
+
+# Confusion matrices
+write.csv(as.table(rcv.svm_confmat.a), "a_confmat_svm.csv")
+write.csv(as.table(rcv.tree_confmat.a), "a_confmat_tree.csv")
+write.csv(as.table(rcv.rf_confmat.a), "a_confmat_rf.csv")
+write.csv(as.table(rcv.nnet_confmat.a), "a_confmat_nnet.csv")
+
+```
+
+Let's now try to assign the articles to the most specific topic levels we can. The ideal model would be able to predict the most specific category, that is the one that has the lower rank in the hierarchy (h5). However, such an approach would raise several issues:  
+
+* More specific categories would result in a lowest number of articles belonging to each topic level, which would hinder the training phase of the model (an extreme case would be to observe a different category per article).  
+* Not all articles are assigned to highly specific categories. Therefore, training the model on too specific categories would reduce the amount of data available.
+
+```{r}
+
+sample_sizes <- c(length(na.omit(rcv.data$h2)), length(na.omit(rcv.data$h3)), length(na.omit(rcv.data$h4)),
+                  length(na.omit(rcv.data$h5)))
+nb_categories <- c(length(unique(na.omit(rcv.data$h2))), length(unique(na.omit(rcv.data$h3))),
+                   length(unique(na.omit(rcv.data$h4))), length(unique(na.omit(rcv.data$h5))))
+hlevel_choice <- as.data.frame(rbind(sample_sizes, nb_categories))
+
+colnames(hlevel_choice) <- c("h2", "h3", "h4", "h5")
+row.names(hlevel_choice) <- c("Sample Size", "Number of Categories")
+
+```
+
+```{r}
+
+hlevel_choice %>%
+  kbl(caption = "SAMPLE SIZES FOR DIFFERENT HIERARCHY LEVELS", align = "c") %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/hlevel_choice.png")
+
+```
+
+It appears that h3 is a good trade-off between the size of the sample (large enough) and the number of topic levels (not too high to avoid overfitting).  
+
+We also have to take care of the following issue: some of the models we are going to use are limited in the number of topic levels they can support (TREE is for instance limited to 32). To solve this, one solution could be to remove low frequency categories (let's say those that represent less than 0.5% of the whole sample).
+
+```{r}
+
+# Create the relevant data frame
+rcv.data.b <- rcv.data %>% select(id, article, h3, id_cat)
+rcv.data.b <- na.omit(rcv.data.b)
+rcv.data.b <- unique(rcv.data.b)
+row.names(rcv.data.b) <- NULL
+
+# Remove categories with low frequency
+threshold <- 0.005
+freq <- as.data.frame(table(rcv.data.b$id_cat))
+freq$percent <- freq$Freq / sum(freq$Freq)
+freq <- freq %>% filter(percent > threshold)
+rcv.data.b <- rcv.data.b %>% filter(id_cat %in% freq$Var1)
+view(rcv.data.b)
+
+```
+
+Let's now use this new dataset to train the four relevant models.
+
+```{r}
+
+N <- nrow(rcv.data.b)
+Ntrain <- 0.5*N
+Ntest <- N - Ntrain
+sparseThreshold <- 0.01
+
+# Create document-term matrix
+rcv.matrix.b <- create_matrix(rcv.data.b$article,
+                          language = "english",
+                          removeSparseTerms = (1-sparseThreshold),
+                          weighting = weightTf)
+
+# Create container
+rcv.container.b <- create_container(rcv.matrix.b, rcv.data.b$id_cat,
+                                 trainSize = 1:Ntrain,
+                                 testSize = (Ntrain+1):N,
+                                 virgin = FALSE)
+
+```
+
+```{r}
+
+# Train SVM
+rcv.svm.b <- train_model(rcv.container.b, "SVM")
+
+# Classify
+rcv.svm_classify.b <- classify_model(rcv.container.b, rcv.svm.b)
+
+# Evaluate
+rcv.svm_analytics.b <- create_analytics(rcv.container.b, rcv.svm_classify.b)
+
+# Show analytics
+rcv.svm_summary.b <- summary(rcv.svm_analytics.b)
+rcv.svm_ensemble.b <- rcv.svm_analytics.b@ensemble_summary
+rcv.svm_performance.b <- rcv.svm_analytics.b@algorithm_summary
+rcv.svm_confmat.b <- confusionMatrix(factor(rcv.svm_analytics.b@document_summary$SVM_LABEL),
+                                   factor(rcv.svm_analytics.b@document_summary$MANUAL_CODE))
+
+```
+
+```{r}
+
+# Train TREE
+rcv.tree.b <- train_model(rcv.container.b, "TREE")
+
+# Classify
+rcv.tree_classify.b <- classify_model(rcv.container.b, rcv.tree.b)
+
+# Evaluate
+rcv.tree_analytics.b <- create_analytics(rcv.container.b, rcv.tree_classify.b)
+
+# Show analytics
+rcv.tree_summary.b <- summary(rcv.tree_analytics.b)
+rcv.tree_ensemble.b <- rcv.tree_analytics.b@ensemble_summary
+rcv.tree_performance.b <- rcv.tree_analytics.b@algorithm_summary
+rcv.tree_confmat.b <- confusionMatrix(factor(rcv.tree_analytics.b@document_summary$TREE_LABEL),
+                                    factor(rcv.tree_analytics.b@document_summary$MANUAL_CODE))
+
+```
+
+```{r}
+
+# Train RF
+rcv.rf.b <- train_model(rcv.container.b, "RF")
+
+# Classify
+rcv.rf_classify.b <- classify_model(rcv.container.b, rcv.rf.b)
+
+# Evaluate
+rcv.rf_analytics.b <- create_analytics(rcv.container.b, rcv.rf_classify.b)
+                                  
+# Show analytics
+rcv.rf_summary.b <- summary(rcv.rf_analytics.b)
+rcv.rf_ensemble.b <- rcv.rf_analytics.b@ensemble_summary
+rcv.rf_performance.b <- rcv.rf_analytics.b@algorithm_summary
+rcv.rf_confmat.b <- confusionMatrix(factor(rcv.rf_analytics.b@document_summary$FORESTS_LABEL),
+                                  factor(rcv.rf_analytics.b@document_summary$MANUAL_CODE))
+
+```
+
+```{r}
+
+# Train NNET
+rcv.nnet.b <- train_model(rcv.container.b, "NNET")
+
+# Classify
+rcv.nnet_classify.b <- classify_model(rcv.container.b, rcv.nnet.b)
+
+# Evaluate
+rcv.nnet_analytics.b <- create_analytics(rcv.container.b, rcv.nnet_classify.b)
+                                  
+# Show analytics
+rcv.nnet_summary.b <- summary(rcv.nnet_analytics.b)
+rcv.nnet_ensemble.b <- rcv.nnet_analytics.b@ensemble_summary
+rcv.nnet_performance.b <- rcv.nnet_analytics.b@algorithm_summary
+rcv.nnet_confmat.b <- confusionMatrix(factor(rcv.nnet_analytics.b@document_summary$NNETWORK_LABEL), 
+                                    factor(rcv.nnet_analytics.b@document_summary$MANUAL_CODE))
+
+```
+
+```{r}
+
+# Export outputs to csv files
+# Ensemble summaries
+accuracies.b <- c(as.data.frame(rcv.svm_ensemble.b)$`n-ENSEMBLE RECALL`, 
+                  as.data.frame(rcv.tree_ensemble.b)$`n-ENSEMBLE RECALL`,
+                  as.data.frame(rcv.rf_ensemble.b)$`n-ENSEMBLE RECALL`, 
+                  as.data.frame(rcv.nnet_ensemble.b)$`n-ENSEMBLE RECALL`)
+summaries.b <- rbind(accuracies.b, cbind(rcv.svm_summary.b, rcv.tree_summary.b, rcv.rf_summary.b, rcv.nnet_summary.b))
+row.names(summaries.b) <- c("ACCURACY", "PRECISION", "RECALL", "FSCORE")
+colnames(summaries.b) <- c("SVM", "TREE", "FORESTS", "NNETWORK")
+write.csv(summaries.b, "b_summaries.csv")
+
+# Algorithm performances
+performances.b <- cbind(rcv.svm_performance.b, rcv.tree_performance.b, rcv.rf_performance.b, rcv.nnet_performance.b)
+write.csv(performances.b, "b_performances.csv")
+
+# Confusion matrices
+write.csv(as.table(rcv.svm_confmat.b), "b_confmat_svm.csv")
+write.csv(as.table(rcv.tree_confmat.b), "b_confmat_tree.csv")
+write.csv(as.table(rcv.rf_confmat.b), "b_confmat_rf.csv")
+write.csv(as.table(rcv.nnet_confmat.b), "b_confmat_nnet.csv")
+
+```
+
+## Part II: Model Comparison, Evaluation and Selection
+
+Now that the four models have been trained with the goal to predict the four top categories each article belongs to, let's have a look at how they perform out of sample.
+
+The metrics we used are the following:  
+
+* Accuracy, which gives the percentage of right predictions: $\frac{TP+TN}{TP+FP+FN+TN}$.   
+* Precision, which is the fraction of relevant instances among the retrieved instances: $\frac{TP}{TP+FP}$. 
+* Recall, which is the fraction of relevant instances that were retrieved: $\frac{TP}{TP+FN} $.  
+* F-Score, which is computed as the geometric mean of precision and recall: $\frac{2*Precision*Recall}{Precision+Recall}$
+* We also had a look at the confusion matrices in order to assess more precisely the precision and recall specific to each of the four categories.
+
+```{r}
+
+# Download outputs from csv
+performances.a <- read.csv("a_performances.csv", row.names = 1)
+summaries.a <- read.csv("a_summaries.csv", row.names = 1)
+svm_confmat.a <- read.csv("a_confmat_svm.csv", row.names = 1, header = T)
+tree_confmat.a <- read.csv("a_confmat_tree.csv", row.names = 1, header = T)
+rf_confmat.a <- read.csv("a_confmat_rf.csv", row.names = 1, header = T)
+nnet_confmat.a <- read.csv("a_confmat_nnet.csv", row.names = 1, header = T)
+
+```
+
+#### General Summary:
+
+```{r}
+
+# General summary
+summaries.a %>%
+  kbl(caption = "GENERAL PERFORMANCE SUMMARY", align = "c", digits = 2) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/summaries.a.png")
+
+```
+
+Out of the four models used, SVM and RF appear to stand out significantly. 
+
+e.g.: the SVM model made 80% of good predictions and has a F-Score of 0.76 while the decision tree made only 58% of good predictions and has a F-Score of 0.46.  
+
+Now let's take a closer look at the performances of each model specifically.
+
+#### Support Vector Machine:
+
+```{r}
+
+# Confusion matrix
+colnames(svm_confmat.a) <- c("39-ACTUAL", "72-ACTUAL", "84-ACTUAL", "117-ACTUAL")
+row.names(svm_confmat.a) <- c("39-PREDICTED", "72-PREDICTED", "84-PREDICTED", "117-PREDICTED")
+
+svm_confmat.a %>%
+  kbl(caption = "SVM CONFUSION MATRIX", align = "c", row.names = T) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/svm_confmat.a.png")
+
+# Performance for each category
+performances.a[,1:3] %>%
+  kbl(caption = "SVM PERFORMANCE SUMMARY", align = "c", row.names = T) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/svm_performances.a.png")
+
+```
+
+Despite the good overall performances of SVM, the model still appears to struggle at accurately predicting category "72", with a recall of 0.51. It means that among all the articles belonging to the "72" category, only 51% were correctly classified.
+
+#### Decision Tree:
+
+```{r}
+
+# Confusion matrix
+colnames(tree_confmat.a) <- c("39-ACTUAL", "72-ACTUAL", "84-ACTUAL", "117-ACTUAL")
+row.names(tree_confmat.a) <- c("39-PREDICTED", "72-PREDICTED", "84-PREDICTED", "117-PREDICTED")
+
+tree_confmat.a %>%
+  kbl(caption = "DECISION TREE CONFUSION MATRIX", align = "c", row.names = T) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/tree_confmat.a.png")
+
+# Performance for each category
+performances.a[,4:6] %>%
+  kbl(caption = "DECISION TREE PERFORMANCE SUMMARY", align = "c", row.names = T) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/tree_performances.a.png")
+
+```
+
+The overall performances of the decision tree are much weaker than those of the SVM model. The algorithm did not even manage to assign the category "72" to any of the articles in the test sample. 
+
+#### Random Forests:
+
+```{r}
+
+# Confusion matrix
+colnames(rf_confmat.a) <- c("39-ACTUAL", "72-ACTUAL", "84-ACTUAL", "117-ACTUAL")
+row.names(rf_confmat.a) <- c("39-PREDICTED", "72-PREDICTED", "84-PREDICTED", "117-PREDICTED")
+
+rf_confmat.a %>%
+  kbl(caption = "RANDOM FOREST CONFUSION MATRIX", align = "c", row.names = T) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/rf_confmat.a.png")
+
+# Performance for each category
+performances.a[,7:9] %>%
+  kbl(caption = "RANDOM FOREST PERFORMANCE SUMMARY", align = "c", row.names = T) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/rf_performances.a.png")
+
+```
+
+Random forests (sort of upgraded version of decision trees) unsurprisingly performed better than the decision tree and can be compared to the SVM model. Let's note that even though the precision and recall for categories "39", "84" and "117" are slightly better, SVM significantly outperforms random forests for category "72", which makes it difficult to choose between the two.
+
+#### Neural Networks:
+
+```{r}
+
+# Confusion matrix
+colnames(nnet_confmat.a) <- c("39-ACTUAL", "72-ACTUAL", "84-ACTUAL", "117-ACTUAL")
+row.names(nnet_confmat.a) <- c("39-PREDICTED", "72-PREDICTED", "84-PREDICTED", "117-PREDICTED")
+
+nnet_confmat.a %>%
+  kbl(caption = "NEURAL NETWORKS CONFUSION MATRIX", align = "c", row.names = T) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/nnet_confmat.a.png")
+
+# Performance for each category
+performances.a[,10:12] %>%
+  kbl(caption = "NEURAL NETWORKS PERFORMANCE SUMMARY", align = "c", row.names = T) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/nnet_performances.a.png")
+
+```
+
+Neural networks performed even more poorly than the decision tree since the model was not only unable to predict category "72", but also failed to predict category "117". This unsurprisingly resulted in low overall performance metrics (see general summary above).
+
+#### Selection:
+
+Regarding the different metrics, SVM and RF appear to be the most relevant models to use for this classification task. However, even though RF seems to perform slightly better overall, it could be wise to wait for the results of the second classification task to see if the trend is confirmed.
+
+Let's now repeat the same selection process for the second classification task.
+
+```{r}
+
+# Download outputs from csv
+performances.b <- read.csv("b_performances.csv", row.names = 1)
+summaries.b <- read.csv("b_summaries.csv", row.names = 1)
+svm_confmat.b <- read.csv("b_confmat_svm.csv", row.names = 1, header = T)
+tree_confmat.b <- read.csv("b_confmat_tree.csv", row.names = 1, header = T)
+rf_confmat.b <- read.csv("b_confmat_rf.csv", row.names = 1, header = T)
+nnet_confmat.b <- read.csv("b_confmat_nnet.csv", row.names = 1, header = T)
+
+```
+ 
+```{r}
+
+# General summary
+summaries.b %>%
+  kbl(caption = "GENERAL PERFORMANCE SUMMARY", align = "c", digits = 2) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/summaries.b.png")
+
+```
+
+Since we increased the number of predictable topic levels and therefore increased the models' complexity, we logically observe a general drop in the performance metrics. Nevertheless, the raking remains unchanged, with SVM and random forests still significantly outperforming neural networks and decision tree. We can however observe that this time, SVM performed better than random forests on 3 out of the 4 relevant metrics (accuracy, recall and F-score).
+
+**Let's therefore use SVM for further tuning and classification.** There is a good chance that this model will still outperform the others (and specifically decision tree and neural networks) in similar situations (articles of the same nature, same methods for text cleaning, use of word frequency for text interpretation etc.). However, changing these parameters may result in different outcomes. 
+
+*Note: For the sake of clarity, we have chosen not to display the confusion matrix and the specific statistics for each category, given the high number of topic levels.*
+
+## Part III: Model Tuning
+
+Now that we have selected the best performing model, it may be interesting to optimize its main parameters. The methodolgy we implemented is the following: 
+
+* First, we considered two key parameters regarding data preparation:  
+  + We made the sparse threshold take the values 0.01 (default value), 0.05 and 0.1 and then chose the best option with regard to the performances on the test sample.
+  + We then did the same with the weighting option: Tf (default value) and Tf-Idf.  
+  
+* Secondly, we selected two of the main parameters of the model and varied them:  
+  + We tested the SVM model using linear ($u^{T}v$), radial ($e^{\gamma|u-v|^2}$, $\gamma = \frac{1}{Dimension_{data}}$) and polynomial ($(\gamma u^{T}v + C_{0})^d$, $\gamma = \frac{1}{Dimension_{data}}$, $C_{0} = 0$, $d = 3$) kernels.  
+  + We finally chose to vary the cost option (the cost of constraints violation, which corresponds to the C-constant of the regularization term in the Lagrange formulation) and test the model on the following values: 0.1, 1 (default value), 10, 100 and 1000.
+
+In the end, we came up with an optimized model on these four parameters.
+
+#### Sparse Threshold:
+
+```{r}
+
+# Sparse Threshold = 0.05
+N <- nrow(rcv.data.a)
+Ntrain <- 0.5*N
+Ntest <- N - Ntrain
+sparseThreshold <- 0.05
+
+# Create document-term matrix
+rcv.matrix.st0.05 <- create_matrix(rcv.data.a$article,
+                          language = "english",
+                          removeSparseTerms = (1-sparseThreshold),
+                          weighting = weightTf)
+
+# Create container
+rcv.container.st0.05 <- create_container(rcv.matrix.st0.05, rcv.data.a$id_cat,
+                                 trainSize = 1:Ntrain,
+                                 testSize = (Ntrain+1):N,
+                                 virgin = FALSE)
+
+# Train
+rcv.svm.st0.05 <- train_model(rcv.container.st0.05, "SVM")
+
+# Classify
+rcv.svm_classify.st0.05 <- classify_model(rcv.container.st0.05, rcv.svm.st0.05)
+
+# Evaluate
+rcv.svm_analytics.st0.05 <- create_analytics(rcv.container.st0.05, rcv.svm_classify.st0.05)
+
+```
+
+```{r}
+
+# Sparse Threshold = 0.1
+N <- nrow(rcv.data.a)
+Ntrain <- 0.5*N
+Ntest <- N - Ntrain
+sparseThreshold <- 0.1
+
+# Create document-term matrix
+rcv.matrix.st0.1 <- create_matrix(rcv.data.a$article,
+                          language = "english",
+                          removeSparseTerms = (1-sparseThreshold),
+                          weighting = weightTf)
+
+# Create container
+rcv.container.st0.1 <- create_container(rcv.matrix.st0.1, rcv.data.a$id_cat,
+                                 trainSize = 1:Ntrain,
+                                 testSize = (Ntrain+1):N,
+                                 virgin = FALSE)
+
+# Train
+rcv.svm.st0.1 <- train_model(rcv.container.st0.1, "SVM")
+
+# Classify
+rcv.svm_classify.st0.1 <- classify_model(rcv.container.st0.1, rcv.svm.st0.1)
+
+# Evaluate
+rcv.svm_analytics.st0.1 <- create_analytics(rcv.container.st0.1, rcv.svm_classify.st0.1)
+
+```
+
+```{r, results = FALSE}
+
+# Compare performances
+comp_st <- rbind(c(as.data.frame(rcv.svm_analytics.a@ensemble_summary)$`n-ENSEMBLE RECALL`, summary(rcv.svm_analytics.a)),
+                 c(as.data.frame(rcv.svm_analytics.st0.05@ensemble_summary)$`n-ENSEMBLE RECALL`, summary(rcv.svm_analytics.st0.05)),
+                 c(as.data.frame(rcv.svm_analytics.st0.1@ensemble_summary)$`n-ENSEMBLE RECALL`, summary(rcv.svm_analytics.st0.1)))
+comp_st <- as.data.frame(comp_st)
+colnames(comp_st) <- c("ACCURACY", "PRECISION", "RECALL", "FSCORE")
+row.names(comp_st) <- c("ST = 0.01", "ST = 0.05", "ST = 0.1")
+write.csv(comp_st, "comp_st.csv")
+comp_st_dl <- read.csv("comp_st.csv", row.names = 1)
+
+```
+
+```{r}
+
+# Show results
+comp_st_dl %>%  
+  kbl(caption = "SVM PERFORMANCE DEPENDING ON SPARSE THRESHOLD", align = "c", digits = 2) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/comp_st_dl.png")
+
+```
+
+**Selected option: Sparse Threshold = 0.01.**
+
+#### Weighting:
+
+```{r}
+
+# Weighting method: "weightTfIdf"
+N <- nrow(rcv.data.a)
+Ntrain <- 0.5*N
+Ntest <- N - Ntrain
+sparseThreshold <- 0.01
+
+# Create document-term matrix
+rcv.matrix.wtfidf <- create_matrix(rcv.data.a$article,
+                          language = "english",
+                          removeSparseTerms = (1-sparseThreshold),
+                          weighting = weightTfIdf)
+
+# Create container
+rcv.container.wtfidf <- create_container(rcv.matrix.wtfidf, rcv.data.a$id_cat,
+                                 trainSize = 1:Ntrain,
+                                 testSize = (Ntrain+1):N,
+                                 virgin = FALSE)
+
+# Train
+rcv.svm.wtfidf <- train_model(rcv.container.wtfidf, "SVM")
+
+# Classify
+rcv.svm_classify.wtfidf <- classify_model(rcv.container.wtfidf, rcv.svm.wtfidf)
+
+# Evaluate
+rcv.svm_analytics.wtfidf <- create_analytics(rcv.container.wtfidf, rcv.svm_classify.wtfidf)
+
+```
+
+```{r, results = FALSE}
+
+# Compare performances
+comp_w <- rbind(c(as.data.frame(rcv.svm_analytics.a@ensemble_summary)$`n-ENSEMBLE RECALL`, summary(rcv.svm_analytics.a)),
+                 c(as.data.frame(rcv.svm_analytics.wtfidf@ensemble_summary)$`n-ENSEMBLE RECALL`, summary(rcv.svm_analytics.wtfidf)))
+comp_w <- as.data.frame(comp_w)
+colnames(comp_w) <- c("ACCURACY", "PRECISION", "RECALL", "FSCORE")
+row.names(comp_w) <- c("Weighting = weightTf", "Weighting = weightTfIdf")
+write.csv(comp_w, "comp_w.csv")
+comp_w_dl <- read.csv("comp_w.csv", row.names = 1)
+
+```
+
+```{r}
+
+# Show results
+comp_w_dl %>%  
+  kbl(caption = "SVM PERFORMANCE DEPENDING ON WEIGHTING METHOD", align = "c", digits = 2) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/comp_w_dl.png")
+
+```
+
+**Selected option: Weighting = weightTf.**
+
+#### Kernel:
+
+```{r}
+
+# Kernel = linear
+
+# Train
+rcv.svm.klin <- train_model(rcv.container.a, algorithm = "SVM", kernel = "linear")
+
+# Classify
+rcv.svm_classify.klin <- classify_model(rcv.container.a, rcv.svm.klin)
+
+# Evaluate
+rcv.svm_analytics.klin <- create_analytics(rcv.container.a, rcv.svm_classify.klin)
+
+```
+
+```{r}
+
+# Kernel = radial
+
+# Train
+rcv.svm.krad <- train_model(rcv.container.a, algorithm = "SVM", kernel = "radial")
+
+# Classify
+rcv.svm_classify.krad <- classify_model(rcv.container.a, rcv.svm.krad)
+
+# Evaluate
+rcv.svm_analytics.krad <- create_analytics(rcv.container.a, rcv.svm_classify.krad)
+
+```
+
+```{r}
+
+# Kernel = polynomial
+
+# Train
+rcv.svm.kpol <- train_model(rcv.container.a, algorithm = "SVM", kernel = "polynomial")
+
+# Classify
+rcv.svm_classify.kpol <- classify_model(rcv.container.a, rcv.svm.kpol)
+
+# Evaluate
+rcv.svm_analytics.kpol <- create_analytics(rcv.container.a, rcv.svm_classify.kpol)
+
+```
+
+```{r, results = FALSE}
+
+# Compare performances
+comp_k <- rbind(c(as.data.frame(rcv.svm_analytics.klin@ensemble_summary)$`n-ENSEMBLE RECALL`, summary(rcv.svm_analytics.klin)),
+                c(as.data.frame(rcv.svm_analytics.krad@ensemble_summary)$`n-ENSEMBLE RECALL`, summary(rcv.svm_analytics.krad)),
+                c(as.data.frame(rcv.svm_analytics.kpol@ensemble_summary)$`n-ENSEMBLE RECALL`, summary(rcv.svm_analytics.kpol)))
+comp_k <- as.data.frame(comp_k)
+colnames(comp_k) <- c("ACCURACY", "PRECISION", "RECALL", "FSCORE")
+row.names(comp_k) <- c("Kernel = linear", "Kernel = radial", "Kernel = polynomial")
+write.csv(comp_k, "comp_k.csv")
+comp_k_dl <- read.csv("comp_k.csv", row.names = 1)
+
+```
+
+```{r}
+
+# Show results
+comp_k_dl %>%  
+  kbl(caption = "SVM PERFORMANCE DEPENDING ON KERNEL", align = "c", digits = 2) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/comp_k_dl.png")
+
+```
+
+**Selected option: Kernel = radial.**
+
+#### Cost:
+
+```{r}
+
+# Cost = 0.1
+
+# Train
+rcv.svm.c0.1 <- train_model(rcv.container.a, algorithm = "SVM", kernel = "radial", cost = 0.1)
+
+# Classify
+rcv.svm_classify.c0.1 <- classify_model(rcv.container.a, rcv.svm.c0.1)
+
+# Evaluate
+rcv.svm_analytics.c0.1 <- create_analytics(rcv.container.a, rcv.svm_classify.c0.1)
+
+```
+
+```{r}
+
+# Cost = 10
+
+# Train
+rcv.svm.c10 <- train_model(rcv.container.a, algorithm = "SVM", kernel = "radial", cost = 10)
+
+# Classify
+rcv.svm_classify.c10 <- classify_model(rcv.container.a, rcv.svm.c10)
+
+# Evaluate
+rcv.svm_analytics.c10 <- create_analytics(rcv.container.a, rcv.svm_classify.c10)
+
+```
+
+```{r}
+
+# Cost = 100
+
+# Train
+rcv.svm.c100 <- train_model(rcv.container.a, algorithm = "SVM", kernel = "radial", cost = 100)
+
+# Classify
+rcv.svm_classify.c100 <- classify_model(rcv.container.a, rcv.svm.c100)
+
+# Evaluate
+rcv.svm_analytics.c100 <- create_analytics(rcv.container.a, rcv.svm_classify.c100)
+
+```
+
+```{r}
+
+# Cost = 1000
+
+# Train
+rcv.svm.c1000 <- train_model(rcv.container.a, algorithm = "SVM", kernel = "radial", cost = 1000)
+
+# Classify
+rcv.svm_classify.c1000 <- classify_model(rcv.container.a, rcv.svm.c1000)
+
+# Evaluate
+rcv.svm_analytics.c1000 <- create_analytics(rcv.container.a, rcv.svm_classify.c1000)
+
+```
+
+```{r, results = FALSE}
+
+# Compare performances
+comp_c <- rbind(c(as.data.frame(rcv.svm_analytics.c0.1@ensemble_summary)$`n-ENSEMBLE RECALL`, summary(rcv.svm_analytics.c0.1)),
+                c(as.data.frame(rcv.svm_analytics.a@ensemble_summary)$`n-ENSEMBLE RECALL`, summary(rcv.svm_analytics.a)),
+                c(as.data.frame(rcv.svm_analytics.c10@ensemble_summary)$`n-ENSEMBLE RECALL`, summary(rcv.svm_analytics.c10)),
+                c(as.data.frame(rcv.svm_analytics.c100@ensemble_summary)$`n-ENSEMBLE RECALL`, summary(rcv.svm_analytics.c100)),
+                c(as.data.frame(rcv.svm_analytics.c1000@ensemble_summary)$`n-ENSEMBLE RECALL`, summary(rcv.svm_analytics.c1000)))
+comp_c <- as.data.frame(comp_c)
+colnames(comp_c) <- c("ACCURACY", "PRECISION", "RECALL", "FSCORE")
+row.names(comp_c) <- c("Cost = 0.1", "Cost = 1", "Cost = 10", "Cost = 100", "Cost = 1000")
+write.csv(comp_c, "comp_c.csv")
+comp_c_dl <- read.csv("comp_c.csv", row.names = 1)
+
+```
+
+```{r}
+
+# Show results
+comp_c_dl %>%  
+  kbl(caption = "SVM PERFORMANCE DEPENDING ON COST", align = "c", digits = 2) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/comp_c_dl.png")
+
+```
+
+**Selected option: Cost = 10**
+
+#### Default Model vs. Tuned Model 
+
+See below the comparison between the default and tuned model's performances for the first classification task, regarding accuracy, precision, recall and F-score.
+
+```{r}
+
+comparison.a <- rbind(comp_st_dl["ST = 0.01",], comp_c_dl["Cost = 10",])
+row.names(comparison.a) <- c("DEFAULT", "TUNED")
+
+comparison.a %>%  
+  kbl(caption = "FIRST CLASSIFICATION TASK: DEFAULT MODEL VS. TUNED MODEL", align = "c", digits = 2) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/comparison.a.png")
+
+```
+
+As we can see in the table above, we managed to slightly increase the performance of our model for the first classification task.
+
+Let's now repeat the same tuning process for the second classification task.
+
+#### Sparse Threshold:
+
+```{r}
+
+# Sparse Threshold = 0.05
+N <- nrow(rcv.data.b)
+Ntrain <- 0.5*N
+Ntest <- N - Ntrain
+sparseThreshold <- 0.05
+
+# Create document-term matrix
+rcv.matrix.st0.05_b <- create_matrix(rcv.data.b$article,
+                          language = "english",
+                          removeSparseTerms = (1-sparseThreshold),
+                          weighting = weightTf)
+
+# Create container
+rcv.container.st0.05_b <- create_container(rcv.matrix.st0.05_b, rcv.data.b$id_cat,
+                                 trainSize = 1:Ntrain,
+                                 testSize = (Ntrain+1):N,
+                                 virgin = FALSE)
+
+# Train
+rcv.svm.st0.05_b <- train_model(rcv.container.st0.05_b, "SVM")
+
+# Classify
+rcv.svm_classify.st0.05_b <- classify_model(rcv.container.st0.05_b, rcv.svm.st0.05_b)
+
+# Evaluate
+rcv.svm_analytics.st0.05_b <- create_analytics(rcv.container.st0.05_b, rcv.svm_classify.st0.05_b)
+
+```
+
+```{r}
+
+# Sparse Threshold = 0.1
+N <- nrow(rcv.data.b)
+Ntrain <- 0.5*N
+Ntest <- N - Ntrain
+sparseThreshold <- 0.1
+
+# Create document-term matrix
+rcv.matrix.st0.1_b <- create_matrix(rcv.data.b$article,
+                          language = "english",
+                          removeSparseTerms = (1-sparseThreshold),
+                          weighting = weightTf)
+
+# Create container
+rcv.container.st0.1_b <- create_container(rcv.matrix.st0.1_b, rcv.data.b$id_cat,
+                                 trainSize = 1:Ntrain,
+                                 testSize = (Ntrain+1):N,
+                                 virgin = FALSE)
+
+# Train
+rcv.svm.st0.1_b <- train_model(rcv.container.st0.1_b, "SVM")
+
+# Classify
+rcv.svm_classify.st0.1_b <- classify_model(rcv.container.st0.1_b, rcv.svm.st0.1_b)
+
+# Evaluate
+rcv.svm_analytics.st0.1_b <- create_analytics(rcv.container.st0.1_b, rcv.svm_classify.st0.1_b)
+
+```
+
+```{r, results = FALSE}
+
+# Compare performances
+comp_st_b <- rbind(c(as.data.frame(rcv.svm_analytics.b@ensemble_summary)$`n-ENSEMBLE RECALL`, summary(rcv.svm_analytics.b)),
+                 c(as.data.frame(rcv.svm_analytics.st0.05_b@ensemble_summary)$`n-ENSEMBLE RECALL`,
+                   summary(rcv.svm_analytics.st0.05_b)),
+                 c(as.data.frame(rcv.svm_analytics.st0.1_b@ensemble_summary)$`n-ENSEMBLE RECALL`,
+                   summary(rcv.svm_analytics.st0.1_b)))
+comp_st_b <- as.data.frame(comp_st_b)
+colnames(comp_st_b) <- c("ACCURACY", "PRECISION", "RECALL", "FSCORE")
+row.names(comp_st_b) <- c("ST = 0.01", "ST = 0.05", "ST = 0.1")
+write.csv(comp_st_b, "comp_st_b.csv")
+comp_st_dl_b <- read.csv("comp_st_b.csv", row.names = 1)
+
+```
+
+```{r}
+
+# Show results
+comp_st_dl_b %>%  
+  kbl(caption = "SVM PERFORMANCE DEPENDING ON SPARSE THRESHOLD", align = "c", digits = 2) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/comp_st_dl_b.png")
+
+```
+
+**Selected option: Sparse Threshold = 0.01.**
+
+#### Weighting:
+
+```{r}
+
+# Weighting method: "weightTfIdf"
+N <- nrow(rcv.data.b)
+Ntrain <- 0.5*N
+Ntest <- N - Ntrain
+sparseThreshold <- 0.01
+
+# Create document-term matrix
+rcv.matrix.wtfidf_b <- create_matrix(rcv.data.b$article,
+                          language = "english",
+                          removeSparseTerms = (1-sparseThreshold),
+                          weighting = weightTfIdf)
+
+# Create container
+rcv.container.wtfidf_b <- create_container(rcv.matrix.wtfidf_b, rcv.data.b$id_cat,
+                                 trainSize = 1:Ntrain,
+                                 testSize = (Ntrain+1):N,
+                                 virgin = FALSE)
+
+# Train
+rcv.svm.wtfidf_b <- train_model(rcv.container.wtfidf_b, "SVM")
+
+# Classify
+rcv.svm_classify.wtfidf_b <- classify_model(rcv.container.wtfidf_b, rcv.svm.wtfidf_b)
+
+# Evaluate
+rcv.svm_analytics.wtfidf_b <- create_analytics(rcv.container.wtfidf_b, rcv.svm_classify.wtfidf_b)
+
+```
+
+```{r, results = FALSE}
+
+# Compare performances
+comp_w_b <- rbind(c(as.data.frame(rcv.svm_analytics.b@ensemble_summary)$`n-ENSEMBLE RECALL`, summary(rcv.svm_analytics.b)),
+                 c(as.data.frame(rcv.svm_analytics.wtfidf_b@ensemble_summary)$`n-ENSEMBLE RECALL`,
+                   summary(rcv.svm_analytics.wtfidf_b)))
+comp_w_b <- as.data.frame(comp_w)
+colnames(comp_w_b) <- c("ACCURACY", "PRECISION", "RECALL", "FSCORE")
+row.names(comp_w_b) <- c("Weighting = weightTf", "Weighting = weightTfIdf")
+write.csv(comp_w_b, "comp_w_b.csv")
+comp_w_dl_b <- read.csv("comp_w_b.csv", row.names = 1)
+
+```
+
+```{r}
+
+# Show results
+comp_w_dl_b %>%  
+  kbl(caption = "SVM PERFORMANCE DEPENDING ON WEIGHTING METHOD", align = "c", digits = 2) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/comp_w_dl_b.png")
+
+```
+
+**Selected option: Weighting = weightTf.**
+
+#### Kernel:
+
+```{r}
+
+# Kernel = linear
+
+# Train
+rcv.svm.klin_b <- train_model(rcv.container.b, algorithm = "SVM", kernel = "linear")
+
+# Classify
+rcv.svm_classify.klin_b <- classify_model(rcv.container.b, rcv.svm.klin_b)
+
+# Evaluate
+rcv.svm_analytics.klin_b <- create_analytics(rcv.container.b, rcv.svm_classify.klin_b)
+
+```
+
+```{r}
+
+# Kernel = radial
+
+# Train
+rcv.svm.krad_b <- train_model(rcv.container.b, algorithm = "SVM", kernel = "radial")
+
+# Classify
+rcv.svm_classify.krad_b <- classify_model(rcv.container.b, rcv.svm.krad_b)
+
+# Evaluate
+rcv.svm_analytics.krad_b <- create_analytics(rcv.container.b, rcv.svm_classify.krad_b)
+
+```
+
+```{r}
+
+# Kernel = polynomial
+
+# Train
+rcv.svm.kpol_b <- train_model(rcv.container.b, algorithm = "SVM", kernel = "polynomial")
+
+# Classify
+rcv.svm_classify.kpol_b <- classify_model(rcv.container.b, rcv.svm.kpol_b)
+
+# Evaluate
+rcv.svm_analytics.kpol_b <- create_analytics(rcv.container.b, rcv.svm_classify.kpol_b)
+
+```
+
+```{r, results = FALSE}
+
+# Compare performances
+comp_k_b <- rbind(c(as.data.frame(rcv.svm_analytics.klin_b@ensemble_summary)$`n-ENSEMBLE RECALL`,
+                    summary(rcv.svm_analytics.klin_b)),
+                  c(as.data.frame(rcv.svm_analytics.krad_b@ensemble_summary)$`n-ENSEMBLE RECALL`,
+                    summary(rcv.svm_analytics.krad_b)),
+                  c(as.data.frame(rcv.svm_analytics.kpol_b@ensemble_summary)$`n-ENSEMBLE RECALL`,
+                    summary(rcv.svm_analytics.kpol_b)))
+comp_k_b <- as.data.frame(comp_k_b)
+colnames(comp_k_b) <- c("ACCURACY", "PRECISION", "RECALL", "FSCORE")
+row.names(comp_k_b) <- c("Kernel = linear", "Kernel = radial", "Kernel = polynomial")
+write.csv(comp_k_b, "comp_k_b.csv")
+comp_k_dl_b <- read.csv("comp_k_b.csv", row.names = 1)
+
+```
+
+```{r}
+
+# Show results
+comp_k_dl_b %>%  
+  kbl(caption = "SVM PERFORMANCE DEPENDING ON KERNEL", align = "c", digits = 2) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/comp_k_dl_b.png")
+
+```
+
+**Selected option: Kernel = radial.**
+
+#### Cost:
+
+```{r}
+
+# Cost = 0.1
+
+# Train
+rcv.svm.c0.1_b <- train_model(rcv.container.b, algorithm = "SVM", kernel = "radial", cost = 0.1)
+
+# Classify
+rcv.svm_classify.c0.1_b <- classify_model(rcv.container.b, rcv.svm.c0.1_b)
+
+# Evaluate
+rcv.svm_analytics.c0.1_b <- create_analytics(rcv.container.b, rcv.svm_classify.c0.1_b)
+
+```
+
+```{r}
+
+# Cost = 0.1
+
+# Train
+rcv.svm.c0.1_b <- train_model(rcv.container.b, algorithm = "SVM", kernel = "radial", cost = 0.1)
+
+# Classify
+rcv.svm_classify.c0.1_b <- classify_model(rcv.container.b, rcv.svm.c0.1_b)
+
+# Evaluate
+rcv.svm_analytics.c0.1_b <- create_analytics(rcv.container.b, rcv.svm_classify.c0.1_b)
+
+```
+
+```{r}
+
+# Cost = 10
+
+# Train
+rcv.svm.c10_b <- train_model(rcv.container.b, algorithm = "SVM", kernel = "radial", cost = 10)
+
+# Classify
+rcv.svm_classify.c10_b <- classify_model(rcv.container.b, rcv.svm.c10_b)
+
+# Evaluate
+rcv.svm_analytics.c10_b <- create_analytics(rcv.container.b, rcv.svm_classify.c10_b)
+
+```
+
+```{r}
+
+# Cost = 100
+
+# Train
+rcv.svm.c100_b <- train_model(rcv.container.b, algorithm = "SVM", kernel = "radial", cost = 100)
+
+# Classify
+rcv.svm_classify.c100_b <- classify_model(rcv.container.b, rcv.svm.c100_b)
+
+# Evaluate
+rcv.svm_analytics.c100_b <- create_analytics(rcv.container.b, rcv.svm_classify.c100_b)
+
+```
+
+```{r}
+
+# Cost = 1000
+
+# Train
+rcv.svm.c1000_b <- train_model(rcv.container.b, algorithm = "SVM", kernel = "radial", cost = 1000)
+
+# Classify
+rcv.svm_classify.c1000_b <- classify_model(rcv.container.b, rcv.svm.c1000_b)
+
+# Evaluate
+rcv.svm_analytics.c1000_b <- create_analytics(rcv.container.b, rcv.svm_classify.c1000_b)
+
+```
+
+```{r, results = FALSE}
+
+# Compare performances
+comp_c_b <- rbind(c(as.data.frame(rcv.svm_analytics.c0.1_b@ensemble_summary)$`n-ENSEMBLE RECALL`,
+                    summary(rcv.svm_analytics.c0.1_b)),
+                  c(as.data.frame(rcv.svm_analytics.b@ensemble_summary)$`n-ENSEMBLE RECALL`, summary(rcv.svm_analytics.b)),
+                  c(as.data.frame(rcv.svm_analytics.c10_b@ensemble_summary)$`n-ENSEMBLE RECALL`, summary(rcv.svm_analytics.c10_b)),
+                  c(as.data.frame(rcv.svm_analytics.c100_b@ensemble_summary)$`n-ENSEMBLE RECALL`,
+                    summary(rcv.svm_analytics.c100_b)),
+                  c(as.data.frame(rcv.svm_analytics.c1000_b@ensemble_summary)$`n-ENSEMBLE RECALL`,
+                    summary(rcv.svm_analytics.c1000_b)))
+comp_c_b <- as.data.frame(comp_c_b)
+colnames(comp_c_b) <- c("ACCURACY", "PRECISION", "RECALL", "FSCORE")
+row.names(comp_c_b) <- c("Cost = 0.1", "Cost = 1", "Cost = 10", "Cost = 100", "Cost = 1000")
+write.csv(comp_c_b, "comp_c_b.csv")
+comp_c_dl_b <- read.csv("comp_c_b.csv", row.names = 1)
+
+```
+
+```{r}
+
+# Show results
+comp_c_dl_b %>%  
+  kbl(caption = "SVM PERFORMANCE DEPENDING ON COST", align = "c", digits = 2) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/comp_c_dl_b.png")
+
+```
+
+**Selected option: Cost = 10**
+
+#### Default Model vs. Tuned Model 
+
+See below the comparison between the default and tuned model's performances for the first classification task, regarding accuracy, precision, recall and F-score.
+
+```{r}
+
+comparison.b <- rbind(comp_st_dl_b["ST = 0.01",], comp_c_dl_b["Cost = 10",])
+row.names(comparison.b) <- c("DEFAULT", "TUNED")
+
+comparison.b %>%  
+  kbl(caption = "SECOND CLASSIFICATION TASK: DEFAULT MODEL VS. TUNED MODEL", align = "c", digits = 2) %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/comparison.b.png")
+
+```
+
+For the second classification task as well, we managed to slightly increase the performance of our model (see summary table above).
+
+### Parameters Summary
+
+```{r}
+
+params1 <- c("SVM", 0.01, "Tf", "Radial", 10)
+params2 <- c("SVM", 0.01, "Tf", "Radial", 10)
+params_summary <- data.frame(params1, params2)
+colnames(params_summary) <- c("4-Category Classification Task", "Specific-Category Classification Task")
+row.names(params_summary) <- c("Algorithm", "Sparse Threshold", "Weighting", "Kernel", "Cost")
+
+params_summary %>%  
+  kbl(caption = "MODEL PARAMETERS SUMMARY", align = "c") %>%
+  kable_classic(full_width = T, html_font = "Cambria", font_size = 20) %>%
+  save_kable("Tables/params_summary.png")
+
+```
+
+There is a good chance that these models will perform approximately the same in similar situations (articles of the same nature, similar topics, same methods for text cleaning, use of word frequency for text interpretation etc.). However, radically changing the nature of the input data may produce significantly different results. 
